@@ -40,7 +40,7 @@ NLP_MODEL_CONFIG = {
     },
 }
 def get_model(args, img_size=None, nlp_model_dict=NLP_MODEL_CONFIG):
-    
+
     """Return model (and tokenizer if task is NLP) based on the provided args.
     For task CV optional argument to return specific sized images.
 
@@ -87,6 +87,8 @@ def get_model(args, img_size=None, nlp_model_dict=NLP_MODEL_CONFIG):
                 global_model = VGG(vgg_name="VGG11")
             elif args.dataset == 'synthetic':
                 global_model = monai_unet(args,unet_name="unet_synthetic")
+            elif args.dataset == 'synthetic3D':
+                global_model = monai_unet_3d(args,unet_name="unet_synthetic_3d")
             elif args.dataset == 'ISLES18':
                 print("TO IMPLEMENT MONAI SEGMENTATION NETWORK ON ISLES")
                 global_model = VGG(vgg_name="VGG11")
@@ -309,6 +311,20 @@ def monai_unet(args, unet_name="unet_synthetic", spatial_dims=2,in_channels=1,ou
         ).to(device)
     return model
 
+#This is the unet for the synthetic dataset
+def monai_unet_3d(args, unet_name="unet_synthetic_3d", spatial_dims=3,in_channels=1,out_channels=1,channels_tupple=(16, 32, 64, 128),strides_tuple=(2, 2, 2), num_res_units=2):
+    device =  'cuda' if args.gpu else 'cpu'
+    model = monai.networks.nets.UNet(
+            spatial_dims=spatial_dims,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            channels=channels_tupple,
+            strides=strides_tuple,
+            num_res_units=num_res_units,
+        ).to(device)
+
+    return model
+
 def brats_segmentation_network(args):
     device =  'cuda' if args.gpu else 'cpu'
     model = SegResNet(
@@ -320,4 +336,3 @@ def brats_segmentation_network(args):
     dropout_prob=0.2,
 ).to(device)
     return model
-

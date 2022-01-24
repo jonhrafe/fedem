@@ -6,9 +6,8 @@ import sys
 import copy
 import torch
 from glob import glob
-#import datasets as ds
+import datasets as ds
 import os
-from natsort import natsorted
 
 from torchvision import datasets, transforms
 from os import path, getcwd
@@ -23,7 +22,8 @@ from sampling import (
     cifar_noniid,
     ade_iid,
     ade_noniid,
-    synthetic_segmentation_unequal
+    synthetic_segmentation_unequal,
+    synthetic3D_segmentation_unequal
 )
 from monai.data import ArrayDataset, create_test_image_2d, decollate_batch
 
@@ -38,14 +38,9 @@ from monai.transforms import (
     RandSpatialCrop,
     ScaleIntensity,
     EnsureType,
-    MapTransform,
-    Spacing,
-    AsChannelFirst,
-    ToTensor,
-    #ConvertLabelBrats,
-    RandRotate,
-    NormalizeIntensity,
-    Resize
+    EnsureChannelFirst,
+    DivisiblePad,
+    NormalizeIntensity
 )
 
 
@@ -124,116 +119,6 @@ def get_dataset(args, tokenizer=None, max_seq_len=MAX_SEQUENCE_LENGTH, custom_sa
                 user_groups = ade_noniid(train_dataset, args.num_users)
 
     elif args.task == 'cv':
-        if args.dataset == 'brats':
-            brats_nifti__dir_paths = natsorted(glob(args.ROOT_DATA+'/'"**/**/"))
-            print(len(brats_nifti__dir_paths))
-            print(f"loading BraTS data from {args.ROOT_DATA}/")
-            imtrans = Compose(
-                [   LoadImage(image_only=True),
-                    Spacing(
-                        pixdim=(1.0, 1.0, 1.0),
-                        mode=("bilinear"),
-                        image_only = True,
-                    ),
-                    #ScaleIntensity(),
-                    #NormalizeIntensity(nonzero=True, channel_wise=True),
-                    AsChannelFirst(),
-                    ToTensor(),
-                    #AddChannel(),
-                    #EnsureType(),
-                    #Resized,
-                    #RandFlip(prob=0.5, spatial_axis=0),
-                    RandRotate(),
-                    NormalizeIntensity(nonzero=True, channel_wise=True),
-                    Resize(spatial_size=(112,112,72))
-                ]
-            )
-
-            segtrans = Compose(
-                [   LoadImage(image_only=True),
-                    #AsChannelFirst(),
-                    ToTensor(),
-                    AddChannel(),
-                    ConvertLabelBrats(keys=(1,2,4)),
-                    #EnsureType(),
-                    #Resized,
-                    Resize(spatial_size=(112,112,72),mode='nearest')
-                ]
-            )
-        
-            #The whole dataset will be sliced in terms of the indexes of each of the partitions of the "centralized" dataset read in the next 3 lines
-            train_ids = tuple(open('./data/partitions/brats_centralized_train.txt').read().split('\n'))
-            val_ids = tuple(open('./data/partitions/brats_centralized_validation.txt').read().split('\n'))
-            test_ids = tuple(open('./data/partitions/brats_centralized_test.txt').read().split('\n'))
-            print(len(train_ids),len(val_ids),len(test_ids))
-            train_ids_centers = []
-            val_ids_centers   = []
-            test_ids_centers  = []
-            train_val_ids_centers = []
-            for i in range(1,5): #four centers for BraTS
-                train_file = './data/partitions/federated_brats/brats_federated_training_center_'+str(i)+'.txt'
-                valid_file =  './data/partitions/federated_brats/brats_federated_validation_center_'+str(i)+'.txt'
-                test_file =  './data/partitions/federated_brats/brats_federated_test_center_'+str(i)+'.txt'
-                train_ids_centers.append(tuple(open(train_file).read().split('\n')))
-                val_ids_centers.append(tuple(open(valid_file).read().split('\n')))
-                train_val_ids_centers.append(train_ids_centers[-1]+val_ids_centers[-1])
-                test_ids_centers.append(tuple(open(test_file).read().split('\n')))    
-
-            train_volumes_paths, train_labels_paths = [],[]
-            validation_volumes_paths, validation_labels_paths = [],[]
-            test_volumes_paths, test_labels_paths = [],[]
-
-            for item in brats_nifti__dir_paths:
-                if item.split('/')[-2] in set(train_ids):
-                    train_volumes_paths.append(item+"stacked.nii.gz")
-                    train_labels_paths.append(item+"gt.nii.gz")
-                if item.split('/')[-2] in set(val_ids):
-                    validation_volumes_paths.append(item+"stacked.nii.gz")
-                    validation_labels_paths.append(item+"gt.nii.gz")
-                if item.split('/')[-2] in set(test_ids):
-                    test_volumes_paths.append(item+"stacked.nii.gz")
-                    test_labels_paths.append(item+"gt.nii.gz")
-
-
-            train_dataset = ArrayDataset(train_volumes_paths, imtrans, train_labels_paths, segtrans)
-            val_dataset   = ArrayDataset(validation_volumes_paths, imtrans, validation_labels_paths, segtrans)
-
-            #This two are for using the validation fraction in the FL code
-            train_val_volume_paths = train_volumes_paths+validation_volumes_paths
-            train_val_label_paths = train_labels_paths+validation_labels_paths
-
-
-            train_val_dataset = ArrayDataset(train_val_volume_paths, imtrans, train_val_label_paths, segtrans)
-            test_dataset   = ArrayDataset(test_volumes_paths, imtrans, test_labels_paths, segtrans)
-
-            user_groups = {i:[] for i in range(4)}
-            user_groups_test = {i:[] for i in range(4)}
-
-            train_val_id_centers = train_ids_centers + val_ids_centers
-
-            #Generating mapping between train idxs and clients
-            for i in range(len(train_val_volume_paths)):
-                #print(i)
-                cur_volume_id = train_val_volume_paths[i].split('/')[-2]
-                for j in range(len(train_val_ids_centers)):
-                    for k in range(len(train_val_ids_centers[j])):
-                        if cur_volume_id == train_val_ids_centers[j][k]:
-                            user_groups[j].append(i)
-                            break
-
-            #Generating mapping between test idxs and clients
-            for i in range(len(test_volumes_paths)):
-                #print(i)
-                cur_volume_id = test_volumes_paths[i].split('/')[-2]
-                for j in range(len(test_ids_centers)):
-                    for k in range(len(test_ids_centers[j])):
-                        if cur_volume_id == test_ids_centers[j][k]:
-                            user_groups_test[j].append(i)
-                            break
-
-            return train_val_dataset, test_dataset, user_groups, user_groups_test
-
-
         if args.dataset == 'cifar':
             data_dir = './data/cifar/'
             apply_transform = transforms.Compose(
@@ -296,16 +181,16 @@ def get_dataset(args, tokenizer=None, max_seq_len=MAX_SEQUENCE_LENGTH, custom_sa
 
             #Reading the image paths
             print(args.ROOT_DATA + 'train/' + args.dataset +'/')
-            train_dir = args.ROOT_DATA + '/' + args.dataset + '/train/' 
-            val_dir   = args.ROOT_DATA + '/' + args.dataset + '/val/' 
-            test_dir  = args.ROOT_DATA + '/' + args.dataset + '/test/' 
-            imagepaths_train = sorted(glob(os.path.join(train_dir, "*img*.png")))
+            train_dir = args.ROOT_DATA + '/' + args.dataset + '/train/'
+            val_dir   = args.ROOT_DATA + '/' + args.dataset + '/val/'
+            test_dir  = args.ROOT_DATA + '/' + args.dataset + '/test/'
+            imagepaths_train  = sorted(glob(os.path.join(train_dir, "*img*.png")))
             segmpaths_train   = sorted(glob(os.path.join(train_dir, "*seg*.png")))
             print(len(imagepaths_train),len(segmpaths_train))
-            imagepaths_val = sorted(glob(os.path.join(val_dir, "*img*.png")))
+            imagepaths_val  = sorted(glob(os.path.join(val_dir, "*img*.png")))
             segmpaths_val   = sorted(glob(os.path.join(val_dir, "*seg*.png")))
             print(len(imagepaths_val),len(segmpaths_val))
-            imagepaths_test = sorted(glob(os.path.join(test_dir, "*img*.png")))
+            imagepaths_test  = sorted(glob(os.path.join(test_dir, "*img*.png")))
             segmpaths_test   = sorted(glob(os.path.join(test_dir, "*seg*.png")))
             print(len(imagepaths_test),len(segmpaths_test))
             train_dataset = ArrayDataset(imagepaths_train, train_imtrans, segmpaths_train, train_segtrans)#np.zeros((10,10,10))
@@ -313,8 +198,74 @@ def get_dataset(args, tokenizer=None, max_seq_len=MAX_SEQUENCE_LENGTH, custom_sa
 
 
             print("Num users: " + str(args.num_users))
-            
+
             user_groups   =  synthetic_segmentation_unequal(train_dataset, imagepaths_train, args.num_users)#{0:{0,1,2,3,4,5},1:{6,7,8,9,10}}#custom_sampling(dataset=train_dataset, num_users=args.num_users)
+        if args.dataset =='synthetic3D':
+            print("loading synthetic data...")
+            data_dir = '.data/synthetic_3d/'
+
+            train_imtrans = Compose(
+                [   LoadImage(image_only=True),
+                    NormalizeIntensity(),
+                    DivisiblePad(4),
+                    AddChannel(),
+                    #RandSpatialCrop((256, 256,4), random_size=False),
+                    EnsureType(),
+                    #Resized
+                ]
+            )
+
+            train_segtrans = Compose(
+                [   LoadImage(image_only=True),
+                    DivisiblePad(4),
+                    AddChannel(),
+                    #RandSpatialCrop((256, 256,4), random_size=False),
+                    EnsureType(),
+                    #Resized
+                ]
+            )
+
+
+            val_imtrans  = Compose(
+                [   LoadImage(image_only=True),
+                    NormalizeIntensity(),
+                    DivisiblePad(4),
+                    AddChannel(),
+                    #RandSpatialCrop((256, 256,4), random_size=False),
+                    EnsureType(),
+                    #Resized
+                ]
+            )
+            val_segtrans = Compose(
+                [   LoadImage(image_only=True),
+                    DivisiblePad(4),
+                    AddChannel(),
+                   # RandSpatialCrop((256, 256,4), random_size=False),
+                    EnsureType(),
+                    #Resized
+                ])
+
+            #Reading the image paths
+
+            train_dir = args.ROOT_DATA + '/train_noisy/'
+            print(train_dir)
+            val_dir   = args.ROOT_DATA + '/val_noisy/'
+            test_dir  = args.ROOT_DATA + '/test_noisy/'
+            imagepaths_train = sorted(glob(os.path.join(train_dir, '*img*.nii.gz')))
+            segmpaths_train   = sorted(glob(os.path.join(train_dir,'*seg*.nii.gz')))
+            print(len(imagepaths_train),len(segmpaths_train))
+            imagepaths_val = sorted(glob(os.path.join(val_dir, '*img*.nii.gz')))
+            segmpaths_val   = sorted(glob(os.path.join(val_dir, "*seg*.nii.gz")))
+            print(len(imagepaths_val),len(segmpaths_val))
+            imagepaths_test = sorted(glob(os.path.join(test_dir, '*img*.nii.gz')))
+            segmpaths_test   = sorted(glob(os.path.join(test_dir, "*seg*.nii.gz")))
+            print(len(imagepaths_test),len(segmpaths_test))
+            train_dataset = ArrayDataset(imagepaths_train, train_imtrans, segmpaths_train, train_segtrans)#np.zeros((10,10,10))
+            test_dataset  = ArrayDataset(imagepaths_test, val_imtrans, segmpaths_test, val_segtrans)
+
+            print("Num users: " + str(args.num_users))
+
+            user_groups   =  synthetic3D_segmentation_unequal(train_dataset, imagepaths_train, args.num_users)#{0:{0,1,2,3,4,5},1:{6,7,8,9,10}}#custom_sampling(dataset=train_dataset, num_users=args.num_users)
 
 
         elif args.dataset == 'mnist' or 'fmnist':
@@ -347,11 +298,11 @@ def get_dataset(args, tokenizer=None, max_seq_len=MAX_SEQUENCE_LENGTH, custom_sa
         else:
             raise NotImplementedError(
                 f"""Unrecognized dataset {args.dataset}.
-                Options are: `cifar`, `mnist`, `fmnist`.
+                Options are: `cifar`, `mnist`, `fmnist`,`synthetic3D`.
                 """
             )
-    
-    
+
+
     else:
         raise NotImplementedError(
             f"""Unrecognised task {args.task}.
@@ -393,20 +344,3 @@ def exp_details(args):
     print(f'    Local Batch size   : {args.local_bs}')
     print(f'    Local Epochs       : {args.local_ep}\n')
     return
-
-
-class ConvertLabelBrats(MapTransform):
-    """
-    Convert labels to multi channels based on brats classes:
-    label 1 is the peritumoral edema
-    label 2 is the GD-enhancing tumor
-    label 3 is the necrotic and non-enhancing tumor core
-    The possible classes are TC (Tumor core), WC (Whole tumor)*** we want WC because flair shows whole tumor
-    and ET (Enhancing tumor).
-   """
-
-    def __call__(self, data):
-        first_label_map = torch.tensor(np.array(data) == 1, dtype=torch.uint8)
-        second_label_map = torch.tensor(np.array(data) == 2,dtype=torch.uint8)
-        third_label_map = torch.tensor(np.array(data) == 4,dtype=torch.uint8)
-        return torch.vstack((first_label_map,second_label_map,third_label_map))

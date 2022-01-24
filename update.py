@@ -15,7 +15,7 @@ from os import path, getcwd
 
 sys.path.insert(0, path.join(getcwd(), "..", ".."))
 from models import get_optimizer
-import monai 
+import monai
 from monai.data import  decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric
@@ -89,7 +89,7 @@ class ClientShard(object):
         self.dice_metric_test = DiceMetric(include_background=True, reduction="mean", get_not_nans=False)
         self.post_trans = Compose([EnsureType(), Activations(sigmoid=True), AsDiscrete(threshold_values=True)])
 
-        (   
+        (
             self.trainloader,
             self.validloader,
             self.testloader
@@ -115,11 +115,11 @@ class ClientShard(object):
 
         batch_size_val  = int(len(idxs_val)/10) if int(len(idxs_val)/10)>0 else 1
         batch_size_test = int(len(idxs_test)/10) if int(len(idxs_test)/10)>0 else 1
-        
+
         #print("Ratio Train: " + str(self.args.local_bs))
         #print("Ratio Valid: " + str(batch_size_val))
         #print("Ratio Test: " + str(batch_size_test))
-        
+
         trainloader = load_split_dataset(dataset=dataset, idxs=idxs_train, batch_size=self.args.local_bs, task=self.args.task, shuffle=False)
         validloader = load_split_dataset(dataset=dataset, idxs=idxs_val, batch_size=batch_size_val, task=self.args.task,)
         testloader  = load_split_dataset(dataset=dataset, idxs=idxs_test, batch_size=batch_size_test, task=self.args.task,)
@@ -161,11 +161,19 @@ class ClientShard(object):
                 epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         elif self.args.task == 'cv':
+
+            print(self.args.local_ep)
+
             for iter in range(self.args.local_ep):
                 batch_loss = []
+                #print('iter')
+                #print(iter)
+                #print(len(self.trainloader))
                 for batch_idx, (images, labels) in enumerate(self.trainloader):
                     images, labels = images.to(self.device), labels.to(self.device)
 
+                    #print(batch_idx)
+                    #print(images[0].shape)
                     model.zero_grad()
                     log_probs = model(images)
                     loss = self.criterion(log_probs, labels)
@@ -176,8 +184,11 @@ class ClientShard(object):
                         print('\r| Global Round : {} | Hidden client num : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                             global_round, self.client_idx, iter, batch_idx * len(images),
                             len(self.trainloader.dataset), 100. * batch_idx / len(self.trainloader), loss.item()), end="")
+
                     self.logger.add_scalar('loss', loss.item())
                     batch_loss.append(loss.item())
+
+
                 epoch_loss.append(sum(batch_loss) / len(batch_loss))
         else:
             raise NotImplementedError(
@@ -222,20 +233,16 @@ class ClientShard(object):
 
         elif self.args.task == 'cv':
             if self.args.dataset == 'synthetic':#Is a segmentation task
+                post_trans = Compose([EnsureType(), Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
                 #print("Infering segmentation masks")
+                #model.zero_grad()
                 roi_size = (96, 96)
                 sw_batch_size = 4
                 losses = []
                 for batch_idx, (images, labels) in enumerate(self.testloader):
                     val_images, val_labels = images.to(self.device), labels.to(self.device)
-                    roi_size = (96, 96)
                     val_outputs = sliding_window_inference(val_images, roi_size, sw_batch_size, model)
-                    #val_outputs = torch.from_numpy(np.array([self.post_trans(i) for i in decollate_batch(val_outputs)]))
-                    # compute metric for current iteration
-                    #print("========")
-                    #val_outputs = torch.from_numpy(np.array([self.post_trans(i) for i in decollate_batch(val_outputs)]))
-                    
-                    #print(val_outputs.shape,val_labels.shape)
+                    val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
                     self.dice_metric(y_pred=val_outputs, y=val_labels)
                     #print(len(val_outputs))
                     #print(val_outputs.shape)
@@ -243,7 +250,32 @@ class ClientShard(object):
                     for i in range(len(val_outputs)):
                         loss = self.criterion(val_outputs[i], labels[i])
                         losses.append(loss)
-                metric = self.dice_metric.aggregate().item() 
+
+                metric = self.dice_metric.aggregate().item()
+                # reset the status for next validation round
+                self.dice_metric.reset()
+                return metric, torch.mean(torch.tensor(losses))
+
+            if self.args.dataset == 'synthetic3D':#Is a segmentation task
+                post_trans = Compose([EnsureType(), Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
+                #print("Infering segmentation masks")
+                #model.zero_grad()
+                roi_size=(128, 128, 64),
+                sw_batch_size=1,
+                losses = []
+                for batch_idx, (images, labels) in enumerate(self.testloader):
+                    val_images, val_labels = images.to(self.device), labels.to(self.device)
+                    val_outputs = sliding_window_inference(val_images, roi_size=(128, 128, 64), sw_batch_size=1,predictor=model,overlap=0.5)
+                    val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
+                    self.dice_metric(y_pred=val_outputs, y=val_labels)
+                    #print(len(val_outputs))
+                    #print(val_outputs.shape)
+                    #print(val_labels.shape)
+                    for i in range(len(val_outputs)):
+                        loss = self.criterion(val_outputs[i], labels[i])
+                        losses.append(loss)
+
+                metric = self.dice_metric.aggregate().item()
                 # reset the status for next validation round
                 self.dice_metric.reset()
                 return metric, torch.mean(torch.tensor(losses))
@@ -262,7 +294,7 @@ class ClientShard(object):
                     pred_labels = pred_labels.view(-1)
                     correct += torch.sum(torch.eq(pred_labels, labels)).item()
                     total += len(labels)
-            
+
         else:
             raise NotImplementedError(
                 f"""Unrecognised task {self.args.task}.
@@ -327,6 +359,7 @@ def test_inference(args, model, test_dataset, device):
                 correct += torch.sum(torch.eq(pred_labels, torch.tensor(batch_labels))).item()
                 total += len(batch_labels)
     if args.task == 'cv':
+        post_trans = Compose([EnsureType(), Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
         if args.dataset == 'synthetic':#Is a segmentation task
             #print("Infering segmentation masks")
             roi_size = (96, 96)
@@ -337,13 +370,37 @@ def test_inference(args, model, test_dataset, device):
                 log_probs = model(test_image)
                 loss = criterion(log_probs, test_label)
                 val_outputs = sliding_window_inference(test_image, roi_size, sw_batch_size, model)
-                dice_metric(y_pred=val_outputs, y=test_label)            
+                val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
+                dice_metric(y_pred=val_outputs, y=test_label)
                 metric = dice_metric.aggregate().item()
                 losses.append(loss)
                 metrics.append(metric)
+
             # reset the status for next validation round
             dice_metric.reset()
             return torch.mean(torch.tensor(metrics)), torch.mean(torch.tensor(losses))#Return AVG dice and loss on test_dataset
+
+        if args.dataset == 'synthetic3D':#Is a segmentation task
+            #print("Infering segmentation masks")
+            dice_metric=DiceMetric(include_background=True, reduction="mean", get_not_nans=False)
+            roi_size=(128, 128, 64),
+            sw_batch_size=1,
+            losses,metrics = [],[]
+            for test_image,test_label in test_dataset:
+                test_image, test_label = test_image[np.newaxis,:].to(device), test_label[np.newaxis,:].to(device)
+                #log_probs = model(test_image)
+                #loss = criterion(log_probs, test_label)
+                val_outputs = sliding_window_inference(test_image, roi_size=(128, 128, 64), sw_batch_size=1,predictor=model,overlap=0.5)
+                val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
+                dice_metric(y_pred=val_outputs, y=test_label)
+                metric = dice_metric.aggregate().item()
+                #losses.append(loss)
+                metrics.append(metric)
+
+            # reset the status for next validation round
+            dice_metric.reset()
+            return torch.mean(torch.tensor(metrics))#Return AVG dice and loss on test_dataset
+
 
         else: #Its CV classification
             for batch_idx, (images, labels) in enumerate(testloader):
@@ -362,7 +419,7 @@ def test_inference(args, model, test_dataset, device):
             accuracy = correct/total
             return accuracy, loss
 
-        
+
     else:
         raise NotImplementedError(
             f"""Unrecognised task {args.task}.
